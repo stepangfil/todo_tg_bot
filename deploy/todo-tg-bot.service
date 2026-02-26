@@ -1,0 +1,20 @@
+[Unit]
+Description=Todo Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stronguser
+Group=stronguser
+WorkingDirectory=/home/stronguser/bots/todo_tg_bot
+EnvironmentFile=/home/stronguser/bots/todo_tg_bot/.env
+ExecStart=/home/stronguser/bots/todo_tg_bot/venv/bin/python main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=todo-tg-bot
+
+[Install]
+WantedBy=multi-user.target
