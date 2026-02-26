@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Локальные данные и секреты
+.env
+.env.*
+!.env.example
+tasks.db
+*.db
+
+# Тесты и инструменты
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE и ОС
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
