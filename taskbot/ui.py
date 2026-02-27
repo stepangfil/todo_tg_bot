@@ -290,7 +290,10 @@ def render_panel(chat_id: int, screen: str, payload: dict) -> Tuple[str, InlineK
         return format_tasks_text(chat_id), panel_keyboard()
 
     if screen == Screen.HIST:
-        return _format_history_text(chat_id), panel_keyboard()
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("← Назад", callback_data=CB.LIST)],
+        ])
+        return _format_history_text(chat_id), kb
 
     if screen == Screen.ADD_PROMPT:
         hint = payload.get("hint", "")
