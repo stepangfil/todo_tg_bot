@@ -34,7 +34,6 @@ def fresh_db(tmp_path, monkeypatch):
 def test_panel_keyboard_has_required_buttons():
     kb = panel_keyboard()
     all_cbs = {btn.callback_data for row in kb.inline_keyboard for btn in row}
-    assert CB.LIST in all_cbs
     assert CB.ADD in all_cbs
     assert CB.DONE in all_cbs
     assert CB.DEL in all_cbs
@@ -42,6 +41,8 @@ def test_panel_keyboard_has_required_buttons():
     assert CB.HIST in all_cbs
     assert CB.RECUR in all_cbs
     assert CB.RATES in all_cbs
+    # LIST убран из главной панели (панель сама и есть список)
+    assert CB.LIST not in all_cbs
 
 
 # --- format_tasks_text ---

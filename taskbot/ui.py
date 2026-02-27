@@ -36,20 +36,21 @@ class Screen:
 def panel_keyboard() -> InlineKeyboardMarkup:
     buttons = [
         [
-            InlineKeyboardButton("📋 Список", callback_data=CB.LIST),
             InlineKeyboardButton("➕ Добавить", callback_data=CB.ADD),
         ],
         [
             InlineKeyboardButton("✅ Выполнить", callback_data=CB.DONE),
             InlineKeyboardButton("🗑 Удалить", callback_data=CB.DEL),
+        ],
+        [
             InlineKeyboardButton("⏰ Напоминание", callback_data=CB.REM),
         ],
         [
-            InlineKeyboardButton("🕘 История", callback_data=CB.HIST),
+            InlineKeyboardButton("📅 Регулярные", callback_data=CB.RECUR),
+            InlineKeyboardButton("💱 Курс USDT", callback_data=CB.RATES),
         ],
         [
-            InlineKeyboardButton("🔄 Повторяющиеся", callback_data=CB.RECUR),
-            InlineKeyboardButton("💱 Курс USDT", callback_data=CB.RATES),
+            InlineKeyboardButton("🕘 История", callback_data=CB.HIST),
         ],
     ]
     return InlineKeyboardMarkup(buttons)
