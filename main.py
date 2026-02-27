@@ -7,6 +7,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 from taskbot import db
 from taskbot.handlers import start, on_panel_button, on_text
 from taskbot.reminders import restore_reminders
+from taskbot.recurring import start_recurring_job
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -29,6 +30,7 @@ def main():
         logger.warning("Repeating reminders will NOT work without JobQueue.")
 
     restore_reminders(app)
+    start_recurring_job(app)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_panel_button))

@@ -125,6 +125,30 @@ def db_init():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pending_chat_user ON pending(chat_id, user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_chat_time ON audit_log(chat_id, id DESC)")
 
+        # recurring reminders
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recurring_reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                repeat_kind TEXT NOT NULL,
+                day_of_month INTEGER NOT NULL,
+                month INTEGER,
+                hour INTEGER NOT NULL DEFAULT 10,
+                minute INTEGER NOT NULL DEFAULT 0,
+                next_run_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                owner_id INTEGER,
+                owner_name TEXT
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_recurring_next ON recurring_reminders(next_run_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_recurring_chat ON recurring_reminders(chat_id)")
+
+        _add_column_if_missing(conn, "pending", "meta", "TEXT")
+
 
 # ---------- chat_state ----------
 def set_panel_message_id(chat_id: int, message_id: Optional[int]):
@@ -145,18 +169,19 @@ def get_panel_message_id(chat_id: int) -> Optional[int]:
 
 
 # ---------- pending ----------
-def pending_set(chat_id: int, user_id: int, action: str, task_id: Optional[int] = None):
+def pending_set(chat_id: int, user_id: int, action: str, task_id: Optional[int] = None, meta: Optional[str] = None):
     with db_session() as conn:
         conn.execute(
             """
-            INSERT INTO pending(chat_id, user_id, action, task_id, created_at)
-            VALUES(?, ?, ?, ?, ?)
+            INSERT INTO pending(chat_id, user_id, action, task_id, meta, created_at)
+            VALUES(?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id, user_id) DO UPDATE SET
                 action=excluded.action,
                 task_id=excluded.task_id,
+                meta=excluded.meta,
                 created_at=excluded.created_at
             """,
-            (chat_id, user_id, action, task_id, datetime.now(TZ).isoformat()),
+            (chat_id, user_id, action, task_id, meta, datetime.now(TZ).isoformat()),
         )
 
 
@@ -164,7 +189,7 @@ def pending_get(chat_id: int, user_id: int):
     with db_session() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT chat_id, user_id, action, task_id FROM pending WHERE chat_id=? AND user_id=?",
+            "SELECT chat_id, user_id, action, task_id, meta FROM pending WHERE chat_id=? AND user_id=?",
             (chat_id, user_id),
         )
         return cur.fetchone()
@@ -333,3 +358,94 @@ def fetch_task_text(chat_id: int, task_id: int) -> Optional[str]:
         )
         row = cur.fetchone()
         return row["text"] if row else None
+
+
+# ---------- recurring_reminders ----------
+def recurring_insert(
+    chat_id: int,
+    owner_id: int,
+    owner_name: str,
+    text: str,
+    repeat_kind: str,
+    day_of_month: int,
+    next_run_at_iso: str,
+    month: Optional[int] = None,
+    hour: int = 10,
+    minute: int = 0,
+) -> int:
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO recurring_reminders (
+                chat_id, text, repeat_kind, day_of_month, month, hour, minute,
+                next_run_at, created_at, owner_id, owner_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                text,
+                repeat_kind,
+                day_of_month,
+                month,
+                hour,
+                minute,
+                next_run_at_iso,
+                datetime.now(TZ).isoformat(),
+                owner_id,
+                owner_name,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def recurring_fetch_by_chat(chat_id: int):
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, text, repeat_kind, day_of_month, month, hour, minute, next_run_at, created_at
+            FROM recurring_reminders
+            WHERE chat_id=?
+            ORDER BY next_run_at ASC
+            """,
+            (chat_id,),
+        )
+        return cur.fetchall()
+
+
+def recurring_fetch_one(chat_id: int, rec_id: int):
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM recurring_reminders WHERE chat_id=? AND id=?",
+            (chat_id, rec_id),
+        )
+        return cur.fetchone()
+
+
+def recurring_update_next_run(rec_id: int, next_run_at_iso: str) -> bool:
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE recurring_reminders SET next_run_at=? WHERE id=?",
+            (next_run_at_iso, rec_id),
+        )
+        return cur.rowcount > 0
+
+
+def recurring_delete(chat_id: int, rec_id: int) -> bool:
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM recurring_reminders WHERE chat_id=? AND id=?", (chat_id, rec_id))
+        return cur.rowcount > 0
+
+
+def recurring_fetch_due(now_iso: str):
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, chat_id, text, repeat_kind, day_of_month, month, hour, minute FROM recurring_reminders WHERE next_run_at <= ?",
+            (now_iso,),
+        )
+        return cur.fetchall()

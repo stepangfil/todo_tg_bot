@@ -13,6 +13,8 @@ class CB:
     DEL = "A:DEL"
     REM = "A:REM"
     HIST = "A:HIST"
+    RECUR = "A:RECUR"
+    RECUR_ADD = "A:RECUR_ADD"
 
     # pickers
     DONE_PICK = "DONE"  # f"DONE:{task_id}"
@@ -52,7 +54,14 @@ def cb_rm_snooze30(task_id: int) -> str:
     return f"{CB.RM}:{CB.RM_S30}:{task_id}"
 
 
-@dataclass
+def cb_recur_del(rec_id: int) -> str:
+    return f"RECUR_DEL:{rec_id}"
+
+
+def cb_recur_sched(kind: str, day: int, month: Optional[int] = None) -> str:
+    if kind == "Y" and month is not None:
+        return f"RSCHED:Y:{day}:{month}"
+    return f"RSCHED:M:{day}"
 class ParsedCallback:
     """Результат разбора callback_data.
 
@@ -102,7 +111,7 @@ def parse_callback(data: str) -> ParsedCallback:
             )
         return ParsedCallback(type="UNKNOWN", raw=data)
 
-    # panel actions (LIST/ADD/DONE/DEL/REM/HIST)
+    # panel actions (LIST/ADD/DONE/DEL/REM/HIST/RECUR/RECUR_ADD)
     if data in {
         CB.LIST,
         CB.ADD,
@@ -110,8 +119,8 @@ def parse_callback(data: str) -> ParsedCallback:
         CB.DEL,
         CB.REM,
         CB.HIST,
-        # legacy strings are exactly the same as CB.*,
-        # но оставляем здесь явную ветку на будущее
+        CB.RECUR,
+        CB.RECUR_ADD,
     }:
         return ParsedCallback(type="PANEL", raw=data, action=data)
 
@@ -140,6 +149,22 @@ def parse_callback(data: str) -> ParsedCallback:
         except ValueError:
             task_id = None
         return ParsedCallback(type="PICK_REM", raw=data, task_id=task_id)
+
+    # RECUR_DEL:rec_id (task_id в ParsedCallback = rec_id)
+    if data.startswith("RECUR_DEL:"):
+        _, rec_id_str = data.split(":", 1)
+        try:
+            rec_id = int(rec_id_str)
+        except ValueError:
+            rec_id = None
+        return ParsedCallback(type="RECUR_DEL", raw=data, task_id=rec_id)
+
+    if data.startswith("RSCHED:"):
+        parts = data.split(":")
+        if len(parts) >= 3:
+            action = ":".join(parts[1:])  # "M:5" or "Y:15:12"
+            return ParsedCallback(type="RECUR_SCHED", raw=data, action=action)
+        return ParsedCallback(type="UNKNOWN", raw=data)
 
     # reminder set: RSET:task_id:KIND
     if data.startswith(f"{CB.RSET}:") or data.startswith("RSET:"):

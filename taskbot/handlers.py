@@ -19,6 +19,7 @@ from .timeparse import parse_remind_time
 from .permissions import can_action
 from .reminders import cancel_reminder, cancel_reminder_repeat
 from .models import Task
+from .recurring_logic import compute_next_run
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 PENDING_ADD_WAIT_TEXT = "ADD_WAIT_TEXT"
 PENDING_REM_WAIT_TIME = "REM_WAIT_TIME"
 PENDING_REM_WAIT_TIME_TEXT = "REM_WAIT_TIME_TEXT"
+PENDING_RECUR_ADD_TEXT = "RECUR_ADD_TEXT"
+PENDING_RECUR_ADD_SCHEDULE = "RECUR_ADD_SCHEDULE"
 
 
 # ---------- internal helpers for on_panel_button ----------
@@ -595,6 +598,16 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_screen(context, chat_id, Screen.PICK_REM, {"rows": tasks})
             return
 
+        if action == CB.RECUR:
+            db.pending_clear(chat_id, user_id)
+            await show_screen(context, chat_id, Screen.RECUR_LIST)
+            return
+
+        if action == CB.RECUR_ADD:
+            db.pending_set(chat_id, user_id, PENDING_RECUR_ADD_TEXT)
+            await show_screen(context, chat_id, Screen.RECUR_ADD_PROMPT)
+            return
+
         return
 
     # --- pickers / RSET ---
@@ -741,6 +754,78 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await flash_panel(context, chat_id, f"✅ Напоминание: {dt.strftime('%d.%m %H:%M')}")
         return
 
+    if parsed.type == "RECUR_DEL":
+        rec_id = parsed.task_id
+        if not rec_id:
+            return
+        ok = db.recurring_delete(chat_id, rec_id)
+        await show_screen(context, chat_id, Screen.RECUR_LIST)
+        if ok:
+            await flash_panel(context, chat_id, "🗑 Повторяющееся напоминание удалено.")
+        return
+
+    if parsed.type == "RECUR_SCHED":
+        act = (parsed.action or "").strip()
+        if not act:
+            return
+        p = db.pending_get(chat_id, user_id)
+        if not p or p["action"] != PENDING_RECUR_ADD_SCHEDULE:
+            db.pending_clear(chat_id, user_id)
+            await show_screen(context, chat_id, Screen.RECUR_LIST)
+            return
+        reminder_text = (p["meta"] or "").strip()
+        if not reminder_text:
+            db.pending_clear(chat_id, user_id)
+            await show_screen(context, chat_id, Screen.RECUR_LIST)
+            return
+        parts = act.split(":")
+        if len(parts) < 2:
+            db.pending_clear(chat_id, user_id)
+            await show_screen(context, chat_id, Screen.RECUR_LIST)
+            return
+        kind_char, day_str = parts[0], parts[1]
+        try:
+            day = int(day_str)
+        except ValueError:
+            db.pending_clear(chat_id, user_id)
+            await show_screen(context, chat_id, Screen.RECUR_LIST)
+            return
+        month = None
+        if kind_char == "Y" and len(parts) >= 3:
+            try:
+                month = int(parts[2])
+            except ValueError:
+                month = None
+        repeat_kind = "MONTHLY" if kind_char == "M" else "YEARLY"
+        if repeat_kind == "YEARLY" and month is None:
+            month = 1
+        now_local = datetime.now(TZ)
+        next_dt = compute_next_run(
+            repeat_kind=repeat_kind,
+            day_of_month=day,
+            from_dt=now_local,
+            month=month,
+            hour=10,
+            minute=0,
+        )
+        next_iso = next_dt.isoformat()
+        db.recurring_insert(
+            chat_id=chat_id,
+            owner_id=user_id,
+            owner_name=actor_name,
+            text=reminder_text,
+            repeat_kind=repeat_kind,
+            day_of_month=day,
+            next_run_at_iso=next_iso,
+            month=month,
+            hour=10,
+            minute=0,
+        )
+        db.pending_clear(chat_id, user_id)
+        await flash_panel(context, chat_id, f"✅ Добавлено повторяющееся напоминание. След. раз: {next_dt.strftime('%d.%m %H:%M')}")
+        await show_screen(context, chat_id, Screen.RECUR_LIST)
+        return
+
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -843,6 +928,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         db.pending_clear(chat_id, user_id)
         await flash_panel(context, chat_id, f"✅ Напоминание: {parsed.strftime('%d.%m %H:%M')}")
+        return
+
+    if action == PENDING_RECUR_ADD_TEXT:
+        if not text:
+            await show_screen(
+                context,
+                chat_id,
+                Screen.RECUR_ADD_PROMPT,
+                {"hint": "Введи непустой текст."},
+            )
+            return
+        db.pending_set(chat_id, user_id, PENDING_RECUR_ADD_SCHEDULE, meta=text)
+        await show_screen(context, chat_id, Screen.RECUR_ADD_SCHEDULE, {"reminder_text": text})
         return
 
     db.pending_clear(chat_id, user_id)
