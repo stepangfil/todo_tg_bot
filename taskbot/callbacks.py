@@ -15,6 +15,9 @@ class CB:
     HIST = "A:HIST"
     RECUR = "A:RECUR"
     RECUR_ADD = "A:RECUR_ADD"
+    RECUR_ADD_CUSTOM = "A:RECUR_CUSTOM"
+    RECUR_DEL_PICK = "A:RECUR_DEL"
+    RATES = "A:RATES"
 
     # pickers
     DONE_PICK = "DONE"  # f"DONE:{task_id}"
@@ -62,6 +65,9 @@ def cb_recur_sched(kind: str, day: int, month: Optional[int] = None) -> str:
     if kind == "Y" and month is not None:
         return f"RSCHED:Y:{day}:{month}"
     return f"RSCHED:M:{day}"
+
+
+@dataclass
 class ParsedCallback:
     """Результат разбора callback_data.
 
@@ -121,6 +127,9 @@ def parse_callback(data: str) -> ParsedCallback:
         CB.HIST,
         CB.RECUR,
         CB.RECUR_ADD,
+        CB.RECUR_ADD_CUSTOM,
+        CB.RECUR_DEL_PICK,
+        CB.RATES,
     }:
         return ParsedCallback(type="PANEL", raw=data, action=data)
 

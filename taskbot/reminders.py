@@ -91,7 +91,7 @@ def schedule_reminder(app: Application, chat_id: int, task_id: int, remind_at_lo
     for j in app.job_queue.get_jobs_by_name(name):
         j.schedule_removal()
 
-    now = datetime.now(TZ)
+    now = datetime.now(db.get_chat_tz(chat_id))
     delay = (remind_at_local - now).total_seconds()
     if delay <= 0:
         delay = 1
@@ -171,7 +171,7 @@ def restore_reminders(app: Application):
     if app.job_queue is None:
         return
 
-    now = datetime.now(TZ)
+    now = datetime.now(TZ)  # используем дефолтный TZ для restore (только для расчёта задержки)
     for r in db.fetch_pending_reminders():
         try:
             dt = datetime.fromisoformat(r["remind_at"])

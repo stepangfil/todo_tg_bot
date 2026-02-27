@@ -6,13 +6,20 @@ from telegram import Update, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, Application
 from telegram.error import BadRequest
 
-from .config import TZ, FLASH_SECONDS_DEFAULT
+from .config import (
+    TZ, FLASH_SECONDS_DEFAULT,
+    PICK_DONE_LIMIT, PICK_DEL_LIMIT, PICK_REM_LIMIT,
+    TASK_TEXT_MAX_LEN, MAX_TASKS_PER_CHAT,
+    RECURRING_DEFAULT_HOUR, RECURRING_DEFAULT_MINUTE,
+    SCHEDULE_DELETE_SECONDS,
+)
 from . import db, services
 from .callbacks import CB, parse_callback
 from .ui import (
     panel_keyboard,
     format_tasks_text,
     render_panel,
+    remind_quick_keyboard,
     Screen,
 )
 from .timeparse import parse_remind_time
@@ -20,6 +27,8 @@ from .permissions import can_action
 from .reminders import cancel_reminder, cancel_reminder_repeat
 from .models import Task
 from .recurring_logic import compute_next_run
+from .recurring_parse import parse_recurring_schedule, MONTHS_SHORT
+from .rates import format_usdt_thb
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +39,7 @@ PENDING_REM_WAIT_TIME = "REM_WAIT_TIME"
 PENDING_REM_WAIT_TIME_TEXT = "REM_WAIT_TIME_TEXT"
 PENDING_RECUR_ADD_TEXT = "RECUR_ADD_TEXT"
 PENDING_RECUR_ADD_SCHEDULE = "RECUR_ADD_SCHEDULE"
+PENDING_RECUR_ADD_CUSTOM_DAY = "RECUR_ADD_CUSTOM_DAY"
 
 
 # ---------- internal helpers for on_panel_button ----------
@@ -118,203 +128,6 @@ async def _handle_reminder_message_action(
 
         db.set_task_reminder_message_id(chat_id, task_id, None)
         await flash_panel(context, chat_id, "⏳ Ок. Отложил на 30 минут.")
-        return
-
-
-async def _handle_panel_action(
-    *,
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    user_id: int,
-    parsed,
-) -> None:
-    action = parsed.action
-
-    if action == CB.LIST:
-        db.pending_clear(chat_id, user_id)
-        await show_screen(context, chat_id, Screen.LIST)
-        return
-
-    if action == CB.HIST:
-        db.pending_clear(chat_id, user_id)
-        await show_screen(context, chat_id, Screen.HIST)
-        return
-
-    if action == CB.ADD:
-        db.pending_set(chat_id, user_id, PENDING_ADD_WAIT_TEXT)
-        await show_screen(context, chat_id, Screen.ADD_PROMPT)
-        return
-
-    if action == CB.DONE:
-        db.pending_clear(chat_id, user_id)
-        rows = db.fetch_open_tasks(chat_id, limit=10)
-        await show_screen(context, chat_id, Screen.PICK_DONE, {"rows": rows})
-        return
-
-    if action == CB.DEL:
-        db.pending_clear(chat_id, user_id)
-        rows = db.fetch_tasks(chat_id, limit=20)
-        await show_screen(context, chat_id, Screen.PICK_DEL, {"rows": rows})
-        return
-
-    if action == CB.REM:
-        db.pending_clear(chat_id, user_id)
-        rows = db.fetch_open_tasks(chat_id, limit=20)
-        tasks = [Task.from_row(chat_id, r) for r in rows]
-        await show_screen(context, chat_id, Screen.PICK_REM, {"rows": tasks})
-        return
-
-
-async def _handle_pick_or_rset(
-    *,
-    context: ContextTypes.DEFAULT_TYPE,
-    chat,
-    chat_id: int,
-    user_id: int,
-    actor_name: str,
-    parsed,
-) -> None:
-    if parsed.type == "PICK_DONE":
-        task_id = parsed.task_id
-        if not task_id:
-            return
-        ok = services.mark_done(
-            app=context.application,
-            chat_id=chat_id,
-            actor_id=user_id,
-            actor_name=actor_name,
-            task_id=task_id,
-        )
-        await flash_panel(context, chat_id, "✅ Готово." if ok else "ℹ️ Уже выполнено/не найдено.")
-        return
-
-    if parsed.type == "PICK_DEL":
-        task_id = parsed.task_id
-        if not task_id:
-            return
-        row = db.fetch_task(chat_id, task_id)
-        if not row:
-            await flash_panel(context, chat_id, "ℹ️ Не нашёл задачу.")
-            return
-        task = Task.from_row(chat_id, row)
-        if task.deleted:
-            await flash_panel(context, chat_id, "ℹ️ Не нашёл задачу.")
-            return
-
-        allowed = await can_action(
-            context=context,
-            chat=chat,
-            actor_id=user_id,
-            action="DELETE",
-            task_owner_id=task.owner_id,
-        )
-        if not allowed:
-            await flash_panel(context, chat_id, "🚫 Удалять может только автор или админ.")
-            return
-
-        ok = services.delete_task(
-            app=context.application,
-            chat_id=chat_id,
-            actor_id=user_id,
-            actor_name=actor_name,
-            task_id=task_id,
-        )
-        await flash_panel(context, chat_id, "🗑 Удалено (скрыто)." if ok else "ℹ️ Не нашёл задачу.")
-        return
-
-    if parsed.type == "PICK_REM":
-        task_id = parsed.task_id
-        if not task_id:
-            return
-        row = db.fetch_task(chat_id, task_id)
-        if not row:
-            await flash_panel(context, chat_id, "ℹ️ Не нашёл задачу.")
-            return
-        task = Task.from_row(chat_id, row)
-        if task.deleted:
-            await flash_panel(context, chat_id, "ℹ️ Не нашёл задачу.")
-            return
-
-        allowed = await can_action(
-            context=context,
-            chat=chat,
-            actor_id=user_id,
-            action="REM",
-            task_owner_id=task.owner_id,
-        )
-        if not allowed:
-            await flash_panel(context, chat_id, "🚫 Напоминание может менять только автор или админ.")
-            return
-
-        db.pending_set(chat_id, user_id, PENDING_REM_WAIT_TIME, task_id=task_id)
-        await show_screen(context, chat_id, Screen.REM_PROMPT, {"task_id": task_id, "task_text": task.text})
-        return
-
-    if parsed.type == "RSET":
-        task_id = parsed.task_id
-        kind = parsed.action or ""
-        if not task_id:
-            return
-
-        row = db.fetch_task(chat_id, task_id)
-        if not row:
-            await flash_panel(context, chat_id, "ℹ️ Не нашёл задачу.")
-            return
-        task = Task.from_row(chat_id, row)
-        if task.deleted:
-            await flash_panel(context, chat_id, "ℹ️ Не нашёл задачу.")
-            return
-
-        allowed = await can_action(
-            context=context,
-            chat=chat,
-            actor_id=user_id,
-            action="REM",
-            task_owner_id=task.owner_id,
-        )
-        if not allowed:
-            await flash_panel(context, chat_id, "🚫 Напоминание может менять только автор или админ.")
-            return
-
-        if kind == "MANUAL":
-            db.pending_set(chat_id, user_id, PENDING_REM_WAIT_TIME_TEXT, task_id=task_id)
-            await show_screen(context, chat_id, Screen.REM_MANUAL_PROMPT)
-            return
-
-        if kind == "NONE":
-            services.clear_reminder(
-                app=context.application,
-                chat_id=chat_id,
-                actor_id=user_id,
-                actor_name=actor_name,
-                task_id=task_id,
-            )
-            db.pending_clear(chat_id, user_id)
-            await flash_panel(context, chat_id, "✅ Напоминание убрано.")
-            return
-
-        now_local = datetime.now(TZ)
-        if kind == "30M":
-            dt = now_local + timedelta(minutes=30)
-        elif kind == "2H":
-            dt = now_local + timedelta(hours=2)
-        elif kind == "TOM10":
-            base = now_local + timedelta(days=1)
-            dt = base.replace(hour=10, minute=0, second=0, microsecond=0)
-        else:
-            await flash_panel(context, chat_id, "ℹ️ Неизвестная команда.")
-            return
-
-        services.set_reminder(
-            app=context.application,
-            chat_id=chat_id,
-            actor_id=user_id,
-            actor_name=actor_name,
-            task_id=task_id,
-            remind_at=dt,
-        )
-        db.pending_clear(chat_id, user_id)
-        await flash_panel(context, chat_id, f"✅ Напоминание: {dt.strftime('%d.%m %H:%M')}")
         return
 
 
@@ -445,8 +258,43 @@ def schedule_delete_message(app: Application, chat_id: int, message_id: int, whe
 
 
 # ---------- handlers ----------
+_HELP_TEXT = (
+    "<b>📋 Todo-бот — справка</b>\n\n"
+    "<b>Команды:</b>\n"
+    "/start — открыть панель управления\n"
+    "/timezone — посмотреть или изменить часовой пояс\n"
+    "/help — эта справка\n\n"
+    "<b>Панель управления:</b>\n"
+    "➕ Добавить — создать новую задачу\n"
+    "✅ Выполнить — отметить задачу выполненной\n"
+    "🗑 Удалить — удалить задачу\n"
+    "⏰ Напоминание — установить или изменить напоминание\n"
+    "🕘 История — история действий\n"
+    "🔄 Повторяющиеся — ежемесячные/ежегодные напоминания\n"
+    "💱 Курс USDT — текущий курс USDT/THB с Bitkub\n\n"
+    "<b>Форматы времени для напоминаний:</b>\n"
+    "• <code>через 30 мин</code>\n"
+    "• <code>через 2 часа</code>\n"
+    "• <code>завтра 10:00</code>\n"
+    "• <code>25.12 09:00</code>\n"
+    "• <code>нет</code> — убрать напоминание\n\n"
+    "<b>Форматы для повторяющихся напоминаний:</b>\n"
+    "• <code>5</code> или <code>5-го</code> — каждый месяц 5-го\n"
+    "• <code>каждый месяц 15-го</code>\n"
+    "• <code>15 ноября</code> — ежегодно 15 ноября\n"
+    "• <code>последнее число</code>"
+)
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    msg = await update.message.reply_text(_HELP_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+    schedule_delete_message(context.application, chat_id, msg.message_id, when_seconds=60)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    is_first = db.get_panel_message_id(chat_id) is None
 
     msg = await update.effective_chat.send_message(
         text=format_tasks_text(chat_id),
@@ -455,10 +303,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     db.set_panel_message_id(chat_id, msg.message_id)
 
-    hint = await update.effective_chat.send_message(
-        "⬆️ Это панель управления. Можешь закрепить это сообщение в группе (Pin)."
-    )
-    schedule_delete_message(context.application, hint.chat_id, hint.message_id, when_seconds=10)
+    if is_first:
+        hint_text = (
+            "👋 Привет! Это твоя панель управления задачами.\n\n"
+            "⬆️ Закрепи это сообщение (Pin), чтобы панель всегда была под рукой.\n\n"
+            "Справка: /help\n"
+            "Часовой пояс: /timezone"
+        )
+    else:
+        hint_text = "⬆️ Панель управления обновлена."
+
+    hint = await update.effective_chat.send_message(hint_text)
+    schedule_delete_message(context.application, hint.chat_id, hint.message_id, when_seconds=SCHEDULE_DELETE_SECONDS)
 
 
 async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -481,82 +337,10 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- reminder message actions ---
     if parsed.type == "REMINDER_MSG":
-        action = parsed.action
-        task_id = parsed.task_id
-        if not task_id:
-            return
-        row = db.fetch_task(chat_id, task_id)
-        if not row:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
-            except Exception:
-                logger.debug("delete_message (reminder) failed chat_id=%s msg_id=%s", chat_id, q.message.message_id, exc_info=True)
-
-            await flash_panel(context, chat_id, "ℹ️ Задача не найдена/удалена.")
-            cancel_reminder(context.application, chat_id, task_id)
-            cancel_reminder_repeat(context.application, chat_id, task_id)
-            db.set_task_reminder_message_id(chat_id, task_id, None)
-            return
-
-        task = Task.from_row(chat_id, row)
-        if task.deleted:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
-            except Exception:
-                logger.debug("delete_message (reminder) failed chat_id=%s msg_id=%s", chat_id, q.message.message_id, exc_info=True)
-
-            await flash_panel(context, chat_id, "ℹ️ Задача не найдена/удалена.")
-            cancel_reminder(context.application, chat_id, task_id)
-            cancel_reminder_repeat(context.application, chat_id, task_id)
-            db.set_task_reminder_message_id(chat_id, task_id, None)
-            return
-
-        if action == "ACK":
-            ok = services.mark_done(
-                app=context.application,
-                chat_id=chat_id,
-                actor_id=user_id,
-                actor_name=actor_name,
-                task_id=task_id,
-            )
-
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
-            except Exception:
-                logger.debug("delete_message (reminder) failed chat_id=%s msg_id=%s", chat_id, q.message.message_id, exc_info=True)
-
-            await flash_panel(context, chat_id, "✅ Готово." if ok else "ℹ️ Уже выполнено.")
-            return
-
-        if action == "S30":
-            allowed = await can_action(
-                context=context,
-                chat=chat,
-                actor_id=user_id,
-                action="REM",
-                task_owner_id=task.owner_id,
-            )
-            if not allowed:
-                await flash_panel(context, chat_id, "🚫 Напоминание может менять только автор или админ.")
-                return
-
-            _ = services.snooze_30m(
-                app=context.application,
-                chat_id=chat_id,
-                actor_id=user_id,
-                actor_name=actor_name,
-                task_id=task_id,
-            )
-
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
-            except Exception:
-                logger.debug("delete_message (reminder) failed chat_id=%s msg_id=%s", chat_id, q.message.message_id, exc_info=True)
-
-            db.set_task_reminder_message_id(chat_id, task_id, None)
-            await flash_panel(context, chat_id, "⏳ Ок. Отложил на 30 минут.")
-            return
-
+        await _handle_reminder_message_action(
+            context=context, chat=chat, chat_id=chat_id,
+            user_id=user_id, actor_name=actor_name, parsed=parsed, q=q,
+        )
         return
 
     # --- panel actions ---
@@ -579,21 +363,21 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action == CB.DONE:
             db.pending_clear(chat_id, user_id)
-            rows = db.fetch_open_tasks(chat_id, limit=10)
+            rows = db.fetch_open_tasks(chat_id, limit=PICK_DONE_LIMIT)
             tasks = [Task.from_row(chat_id, r) for r in rows]
             await show_screen(context, chat_id, Screen.PICK_DONE, {"rows": tasks})
             return
 
         if action == CB.DEL:
             db.pending_clear(chat_id, user_id)
-            rows = db.fetch_tasks(chat_id, limit=20)
+            rows = db.fetch_tasks(chat_id, limit=PICK_DEL_LIMIT)
             tasks = [Task.from_row(chat_id, r) for r in rows]
             await show_screen(context, chat_id, Screen.PICK_DEL, {"rows": tasks})
             return
 
         if action == CB.REM:
             db.pending_clear(chat_id, user_id)
-            rows = db.fetch_open_tasks(chat_id, limit=20)
+            rows = db.fetch_open_tasks(chat_id, limit=PICK_REM_LIMIT)
             tasks = [Task.from_row(chat_id, r) for r in rows]
             await show_screen(context, chat_id, Screen.PICK_REM, {"rows": tasks})
             return
@@ -608,12 +392,50 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_screen(context, chat_id, Screen.RECUR_ADD_PROMPT)
             return
 
+        if action == CB.RECUR_DEL_PICK:
+            db.pending_clear(chat_id, user_id)
+            rows = db.recurring_fetch_by_chat(chat_id)
+            await show_screen(context, chat_id, Screen.RECUR_PICK_DEL, {"rows": rows})
+            return
+
+        if action == CB.RATES:
+            db.pending_clear(chat_id, user_id)
+            await show_screen(context, chat_id, Screen.RATES, {"rate_text": "⏳ Получаю курс..."})
+            rate_text = await format_usdt_thb()
+            await show_screen(context, chat_id, Screen.RATES, {"rate_text": rate_text})
+            return
+
+        if action == CB.RECUR_ADD_CUSTOM:
+            p = db.pending_get(chat_id, user_id)
+            reminder_text = (p["meta"] or "") if p and p["action"] == PENDING_RECUR_ADD_SCHEDULE else ""
+            db.pending_set(chat_id, user_id, PENDING_RECUR_ADD_CUSTOM_DAY, meta=reminder_text)
+            await show_screen(context, chat_id, Screen.RECUR_ADD_CUSTOM_DAY, {"reminder_text": reminder_text})
+            return
+
         return
 
     # --- pickers / RSET ---
     if parsed.type == "PICK_DONE":
         task_id = parsed.task_id
         if not task_id:
+            return
+        row = db.fetch_task(chat_id, task_id)
+        if not row:
+            await flash_panel(context, chat_id, "ℹ️ Не нашёл задачу.")
+            return
+        task = Task.from_row(chat_id, row)
+        if task.deleted:
+            await flash_panel(context, chat_id, "ℹ️ Не нашёл задачу.")
+            return
+        allowed = await can_action(
+            context=context,
+            chat=chat,
+            actor_id=user_id,
+            action="DONE",
+            task_owner_id=task.owner_id,
+        )
+        if not allowed:
+            await flash_panel(context, chat_id, "🚫 Отметить выполненной может только автор или админ.")
             return
         ok = services.mark_done(
             app=context.application,
@@ -622,7 +444,7 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             actor_name=actor_name,
             task_id=task_id,
         )
-        await flash_panel(context, chat_id, "✅ Готово." if ok else "ℹ️ Уже выполнено/не найдено.")
+        await flash_panel(context, chat_id, "✅ Готово." if ok else "ℹ️ Уже выполнено.")
         return
 
     if parsed.type == "PICK_DEL":
@@ -730,7 +552,8 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await flash_panel(context, chat_id, "✅ Напоминание убрано.")
             return
 
-        now_local = datetime.now(TZ)
+        chat_tz = db.get_chat_tz(chat_id)
+        now_local = datetime.now(chat_tz)
         if kind == "30M":
             dt = now_local + timedelta(minutes=30)
         elif kind == "2H":
@@ -799,14 +622,14 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         repeat_kind = "MONTHLY" if kind_char == "M" else "YEARLY"
         if repeat_kind == "YEARLY" and month is None:
             month = 1
-        now_local = datetime.now(TZ)
+        now_local = datetime.now(db.get_chat_tz(chat_id))
         next_dt = compute_next_run(
             repeat_kind=repeat_kind,
             day_of_month=day,
             from_dt=now_local,
             month=month,
-            hour=10,
-            minute=0,
+            hour=RECURRING_DEFAULT_HOUR,
+            minute=RECURRING_DEFAULT_MINUTE,
         )
         next_iso = next_dt.isoformat()
         db.recurring_insert(
@@ -818,13 +641,56 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             day_of_month=day,
             next_run_at_iso=next_iso,
             month=month,
-            hour=10,
-            minute=0,
+            hour=RECURRING_DEFAULT_HOUR,
+            minute=RECURRING_DEFAULT_MINUTE,
         )
         db.pending_clear(chat_id, user_id)
         await flash_panel(context, chat_id, f"✅ Добавлено повторяющееся напоминание. След. раз: {next_dt.strftime('%d.%m %H:%M')}")
         await show_screen(context, chat_id, Screen.RECUR_LIST)
         return
+
+
+async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args or []
+
+    if not args:
+        current_tz = db.get_chat_tz(chat_id)
+        msg = await update.message.reply_text(
+            f"🕐 Текущий часовой пояс: <b>{current_tz.key}</b>\n\n"
+            "Чтобы изменить, отправь:\n"
+            "<code>/timezone Europe/Moscow</code>\n\n"
+            "Примеры:\n"
+            "• <code>Asia/Bangkok</code> — Bangkok (UTC+7)\n"
+            "• <code>Europe/Moscow</code> — Москва (UTC+3)\n"
+            "• <code>Europe/London</code> — Лондон\n"
+            "• <code>America/New_York</code> — Нью-Йорк\n\n"
+            "Полный список: en.wikipedia.org/wiki/List_of_tz_database_time_zones",
+            parse_mode="HTML",
+        )
+        schedule_delete_message(context.application, chat_id, msg.message_id, when_seconds=30)
+        return
+
+    from zoneinfo import ZoneInfoNotFoundError
+    tz_name = args[0]
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+        _ZI(tz_name)
+    except (ZoneInfoNotFoundError, Exception):
+        msg = await update.message.reply_text(
+            f"❌ Неверный часовой пояс: <code>{tz_name}</code>\n\n"
+            "Используй формат: <code>Europe/Moscow</code>, <code>Asia/Bangkok</code> и т.п.",
+            parse_mode="HTML",
+        )
+        schedule_delete_message(context.application, chat_id, msg.message_id, when_seconds=20)
+        return
+
+    db.set_chat_tz(chat_id, tz_name)
+    msg = await update.message.reply_text(
+        f"✅ Часовой пояс установлен: <b>{tz_name}</b>",
+        parse_mode="HTML",
+    )
+    schedule_delete_message(context.application, chat_id, msg.message_id, when_seconds=10)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -855,14 +721,29 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 {"hint": "Введи непустой текст задачи."},
             )
             return
+        if len(text) > TASK_TEXT_MAX_LEN:
+            await show_screen(
+                context,
+                chat_id,
+                Screen.ADD_PROMPT,
+                {"hint": f"Текст слишком длинный ({len(text)} символов, максимум {TASK_TEXT_MAX_LEN})."},
+            )
+            return
+        if MAX_TASKS_PER_CHAT > 0 and db.count_open_tasks(chat_id) >= MAX_TASKS_PER_CHAT:
+            await show_screen(
+                context,
+                chat_id,
+                Screen.ADD_PROMPT,
+                {"hint": f"Достигнут лимит задач ({MAX_TASKS_PER_CHAT}). Сначала выполни или удали существующие."},
+            )
+            return
         tid = services.add_task(chat_id=chat_id, owner_id=user_id, owner_name=actor_name, text=text)
         db.pending_set(chat_id, user_id, PENDING_REM_WAIT_TIME, task_id=tid)
         await edit_panel(
             context.application,
             chat_id,
             f"✅ Добавил задачу #{tid}\n\n⏰ Установить напоминание?",
-            # оставляем твою текущую клавиатуру (она уже в ui)
-            __import__("taskbot.ui", fromlist=["remind_quick_keyboard"]).remind_quick_keyboard(tid),
+            remind_quick_keyboard(tid),
         )
         return
 
@@ -895,7 +776,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await flash_panel(context, chat_id, "🚫 Напоминание может менять только автор или админ.")
             return
 
-        parsed = parse_remind_time(text, datetime.now(TZ))
+        parsed = parse_remind_time(text, datetime.now(db.get_chat_tz(chat_id)))
         if parsed == "INVALID":
             await show_screen(
                 context,
@@ -941,6 +822,50 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         db.pending_set(chat_id, user_id, PENDING_RECUR_ADD_SCHEDULE, meta=text)
         await show_screen(context, chat_id, Screen.RECUR_ADD_SCHEDULE, {"reminder_text": text})
+        return
+
+    if action == PENDING_RECUR_ADD_CUSTOM_DAY:
+        reminder_text = (p["meta"] or "").strip()
+        parsed_sched = parse_recurring_schedule(text)
+        if parsed_sched == "INVALID":
+            await show_screen(
+                context,
+                chat_id,
+                Screen.RECUR_ADD_CUSTOM_DAY,
+                {"reminder_text": reminder_text, "hint": "Не понял расписание. Попробуй примеры ниже."},
+            )
+            return
+        repeat_kind = parsed_sched["repeat_kind"]
+        day = parsed_sched["day"]
+        month = parsed_sched.get("month")
+        now_local = datetime.now(db.get_chat_tz(chat_id))
+        next_dt = compute_next_run(
+            repeat_kind=repeat_kind,
+            day_of_month=day,
+            from_dt=now_local,
+            month=month,
+            hour=RECURRING_DEFAULT_HOUR,
+            minute=RECURRING_DEFAULT_MINUTE,
+        )
+        db.recurring_insert(
+            chat_id=chat_id,
+            owner_id=user_id,
+            owner_name=actor_name,
+            text=reminder_text,
+            repeat_kind=repeat_kind,
+            day_of_month=day,
+            next_run_at_iso=next_dt.isoformat(),
+            month=month,
+            hour=RECURRING_DEFAULT_HOUR,
+            minute=RECURRING_DEFAULT_MINUTE,
+        )
+        db.pending_clear(chat_id, user_id)
+        if repeat_kind == "MONTHLY":
+            sched_label = f"каждый месяц {day}-го"
+        else:
+            sched_label = f"каждый год {day} {MONTHS_SHORT[month]}"
+        await flash_panel(context, chat_id, f"✅ Добавлено: {sched_label}. След. раз: {next_dt.strftime('%d.%m %H:%M')}")
+        await show_screen(context, chat_id, Screen.RECUR_LIST)
         return
 
     db.pending_clear(chat_id, user_id)

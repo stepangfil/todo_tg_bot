@@ -6,7 +6,7 @@ from datetime import datetime
 
 from telegram.ext import Application, ContextTypes
 
-from .config import TZ
+from .config import TZ, RECURRING_DEFAULT_HOUR, RECURRING_DEFAULT_MINUTE
 from . import db
 from .recurring_logic import compute_next_run
 
@@ -16,7 +16,7 @@ RECURRING_JOB_INTERVAL_SEC = 60
 
 
 async def _recurring_tick(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(TZ)
+    now = datetime.now(TZ)  # UTC-сравнимое время для выборки due
     now_iso = now.isoformat()
     rows = db.recurring_fetch_due(now_iso)
     for row in rows:
@@ -26,8 +26,9 @@ async def _recurring_tick(context: ContextTypes.DEFAULT_TYPE):
         repeat_kind = row["repeat_kind"]
         day_of_month = row["day_of_month"]
         month = row.get("month")
-        hour = row.get("hour") or 10
-        minute = row.get("minute") or 0
+        hour = row.get("hour") or RECURRING_DEFAULT_HOUR
+        minute = row.get("minute") or RECURRING_DEFAULT_MINUTE
+        chat_tz = db.get_chat_tz(chat_id)
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -39,7 +40,7 @@ async def _recurring_tick(context: ContextTypes.DEFAULT_TYPE):
         next_dt = compute_next_run(
             repeat_kind=repeat_kind,
             day_of_month=day_of_month,
-            from_dt=now,
+            from_dt=datetime.now(chat_tz),
             month=month,
             hour=hour,
             minute=minute,

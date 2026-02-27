@@ -5,7 +5,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterator, Optional
 
-from .config import DB_PATH, TZ
+from .config import DB_PATH, TZ, resolve_tz
+from zoneinfo import ZoneInfo
 
 
 # ---------- connection + session ----------
@@ -40,17 +41,31 @@ def db_session() -> Iterator[sqlite3.Connection]:
 
 
 # ---------- migrations helpers ----------
+_ALLOWED_MIGRATIONS: dict[str, set[str]] = {
+    "tasks": {
+        "owner_id", "owner_name", "done_by_id", "done_by_name",
+        "done_at", "reminder_message_id",
+    },
+    "pending": {"meta"},
+    "chat_state": {"timezone"},
+}
+
+
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if table not in _ALLOWED_MIGRATIONS:
+        raise ValueError(f"Migration not allowed for table: {table!r}")
     cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table})")
+    cur.execute(f"PRAGMA table_info({table})")  # noqa: S608 — table validated above
     rows = cur.fetchall()
     return {r["name"] for r in rows}
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, col: str, col_def: str):
+    if table not in _ALLOWED_MIGRATIONS or col not in _ALLOWED_MIGRATIONS[table]:
+        raise ValueError(f"Migration not allowed: {table!r}.{col!r}")
     cols = _table_columns(conn, table)
     if col not in cols:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")  # noqa: S608
 
 
 def db_init():
@@ -148,6 +163,7 @@ def db_init():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_recurring_chat ON recurring_reminders(chat_id)")
 
         _add_column_if_missing(conn, "pending", "meta", "TEXT")
+        _add_column_if_missing(conn, "chat_state", "timezone", "TEXT")
 
 
 # ---------- chat_state ----------
@@ -166,6 +182,24 @@ def get_panel_message_id(chat_id: int) -> Optional[int]:
         cur.execute("SELECT panel_message_id FROM chat_state WHERE chat_id=?", (chat_id,))
         row = cur.fetchone()
         return row["panel_message_id"] if row else None
+
+
+def set_chat_tz(chat_id: int, tz_name: str) -> None:
+    with db_session() as conn:
+        conn.execute(
+            "INSERT INTO chat_state(chat_id, timezone) VALUES(?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET timezone=excluded.timezone",
+            (chat_id, tz_name),
+        )
+
+
+def get_chat_tz(chat_id: int) -> ZoneInfo:
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT timezone FROM chat_state WHERE chat_id=?", (chat_id,))
+        row = cur.fetchone()
+        tz_name = row["timezone"] if row else None
+    return resolve_tz(tz_name)
 
 
 # ---------- pending ----------
@@ -244,6 +278,16 @@ def fetch_open_tasks(chat_id: int, limit: int = 10):
             (chat_id, limit),
         )
         return cur.fetchall()
+
+
+def count_open_tasks(chat_id: int) -> int:
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM tasks WHERE chat_id=? AND deleted=0 AND done=0",
+            (chat_id,),
+        )
+        return cur.fetchone()[0]
 
 
 def fetch_task(chat_id: int, task_id: int):

@@ -10,6 +10,7 @@ from .config import TZ
 from . import db
 from .callbacks import CB, cb_done, cb_del, cb_rem, cb_rset, cb_rm_ack, cb_rm_snooze30, cb_recur_del, cb_recur_sched
 from .models import Task
+from .recurring_parse import MONTHS_SHORT
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,9 @@ class Screen:
     RECUR_LIST = "RECUR_LIST"
     RECUR_ADD_PROMPT = "RECUR_ADD_PROMPT"
     RECUR_ADD_SCHEDULE = "RECUR_ADD_SCHEDULE"
+    RECUR_ADD_CUSTOM_DAY = "RECUR_ADD_CUSTOM_DAY"
+    RECUR_PICK_DEL = "RECUR_PICK_DEL"
+    RATES = "RATES"
 
 
 def panel_keyboard() -> InlineKeyboardMarkup:
@@ -45,6 +49,7 @@ def panel_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🔄 Повторяющиеся", callback_data=CB.RECUR),
+            InlineKeyboardButton("💱 Курс USDT", callback_data=CB.RATES),
         ],
     ]
     return InlineKeyboardMarkup(buttons)
@@ -79,7 +84,7 @@ def reminder_action_keyboard(task_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def _format_task_line(idx: int, task: Task) -> str:
+def _format_task_line(idx: int, task: Task, tz) -> str:
     prefix = f"{idx}. "
     status = "✅" if task.done else "🔹"
     text = task.text
@@ -87,7 +92,7 @@ def _format_task_line(idx: int, task: Task) -> str:
 
     if remind_at:
         try:
-            dt = remind_at.astimezone(TZ)
+            dt = remind_at.astimezone(tz)
             time_part = dt.strftime("%d.%m %H:%M")
             remind_str = f" ⏰ {time_part}"
         except Exception:
@@ -104,11 +109,12 @@ def format_tasks_text(chat_id: int) -> str:
     if not rows:
         return "Пока нет задач.\nНажми «➕ Добавить», чтобы создать первую."
 
+    tz = db.get_chat_tz(chat_id)
     tasks = [Task.from_row(chat_id, row) for row in rows]
 
     lines = ["Твои задачи:"]
     for idx, task in enumerate(tasks, start=1):
-        lines.append(_format_task_line(idx, task))
+        lines.append(_format_task_line(idx, task, tz))
     return "\n".join(lines)
 
 
@@ -132,6 +138,7 @@ def _format_history_text(chat_id: int) -> str:
     if not rows:
         return "Пока нет истории действий."
 
+    tz = db.get_chat_tz(chat_id)
     lines: list[str] = ["📜 История действий\n"]
     last_date_str: str | None = None
     task_text_cache: dict[int, str] = {}
@@ -145,8 +152,8 @@ def _format_history_text(chat_id: int) -> str:
         try:
             dt = datetime.fromisoformat(created_at)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=TZ)
-            dt_local = dt.astimezone(TZ)
+                dt = dt.replace(tzinfo=tz)
+            dt_local = dt.astimezone(tz)
             ts = dt_local.strftime("%H:%M")
             date_str = dt_local.strftime("%d.%m.%Y")
         except Exception:
@@ -205,7 +212,9 @@ def _tasks_pick_keyboard(rows: Iterable, kind: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def _format_recur_line(row) -> str:
+def _format_recur_line(row, tz=None) -> str:
+    if tz is None:
+        tz = TZ
     text = row["text"][:50] + "…" if len(row["text"]) > 50 else row["text"]
     kind = row["repeat_kind"]
     day = row["day_of_month"]
@@ -213,15 +222,14 @@ def _format_recur_line(row) -> str:
         sched = f"каждый месяц {day}-го"
     else:
         month = row["month"] if row["month"] is not None else 1
-        months_ru = ("янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек")
-        sched = f"каждый год {day} {months_ru[month - 1]}"
+        sched = f"каждый год {day} {MONTHS_SHORT[month]}"
     try:
         next_at = row["next_run_at"]
         if next_at:
             dt = datetime.fromisoformat(next_at)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=TZ)
-            next_str = dt.astimezone(TZ).strftime("%d.%m %H:%M")
+                dt = dt.replace(tzinfo=tz)
+            next_str = dt.astimezone(tz).strftime("%d.%m %H:%M")
         else:
             next_str = "—"
     except Exception:
@@ -231,12 +239,26 @@ def _format_recur_line(row) -> str:
 
 def recur_list_keyboard(rows: list) -> InlineKeyboardMarkup:
     buttons = []
+    if rows:
+        buttons.append([
+            InlineKeyboardButton("➕ Добавить", callback_data=CB.RECUR_ADD),
+            InlineKeyboardButton("🗑 Удалить", callback_data=CB.RECUR_DEL_PICK),
+        ])
+    else:
+        buttons.append([InlineKeyboardButton("➕ Добавить", callback_data=CB.RECUR_ADD)])
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data=CB.LIST)])
+    return InlineKeyboardMarkup(buttons)
+
+
+def recur_pick_del_keyboard(rows: list) -> InlineKeyboardMarkup:
+    MAX_LABEL = 40
+    buttons = []
     for row in rows:
         rec_id = row["id"]
-        label = f"🗑 #{rec_id}"
-        buttons.append([InlineKeyboardButton(label, callback_data=cb_recur_del(rec_id))])
-    buttons.append([InlineKeyboardButton("➕ Добавить", callback_data=CB.RECUR_ADD)])
-    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data=CB.LIST)])
+        text = row["text"]
+        short = (text[:MAX_LABEL] + "…") if len(text) > MAX_LABEL else text
+        buttons.append([InlineKeyboardButton(short, callback_data=cb_recur_del(rec_id))])
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data=CB.RECUR)])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -244,12 +266,16 @@ def recur_schedule_keyboard() -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton("📅 1-го", callback_data=cb_recur_sched("M", 1)),
-            InlineKeyboardButton("📅 5-го", callback_data=cb_recur_sched("M", 5)),
+            InlineKeyboardButton("📅 10-го", callback_data=cb_recur_sched("M", 10)),
             InlineKeyboardButton("📅 15-го", callback_data=cb_recur_sched("M", 15)),
         ],
         [
-            InlineKeyboardButton("📅 1 января", callback_data=cb_recur_sched("Y", 1, 1)),
-            InlineKeyboardButton("📅 15 декабря", callback_data=cb_recur_sched("Y", 15, 12)),
+            InlineKeyboardButton("📅 20-го", callback_data=cb_recur_sched("M", 20)),
+            InlineKeyboardButton("📅 25-го", callback_data=cb_recur_sched("M", 25)),
+            InlineKeyboardButton("📅 30-го", callback_data=cb_recur_sched("M", 28)),
+        ],
+        [
+            InlineKeyboardButton("⌨️ Ввести текстом", callback_data=CB.RECUR_ADD_CUSTOM),
         ],
         [
             InlineKeyboardButton("⬅️ Назад", callback_data=CB.RECUR),
@@ -313,14 +339,28 @@ def render_panel(chat_id: int, screen: str, payload: dict) -> Tuple[str, InlineK
 
     if screen == Screen.RECUR_LIST:
         rows = db.recurring_fetch_by_chat(chat_id)
+        chat_tz = db.get_chat_tz(chat_id)
         if not rows:
             text = "Повторяющиеся напоминания (кредиты, страховка и т.п.)\n\nПока нет. Нажми «➕ Добавить»."
         else:
             lines = ["🔄 Повторяющиеся напоминания\n"]
             for row in rows:
-                lines.append(_format_recur_line(row))
+                lines.append(_format_recur_line(row, chat_tz))
             text = "\n".join(lines)
         return text, recur_list_keyboard(rows)
+
+    if screen == Screen.RATES:
+        rate_text = payload.get("rate_text", "⏳ Загрузка...")
+        return rate_text, InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔄 Обновить", callback_data=CB.RATES),
+            InlineKeyboardButton("⬅️ Назад", callback_data=CB.LIST),
+        ]])
+
+    if screen == Screen.RECUR_PICK_DEL:
+        rows = payload.get("rows") or []
+        if not rows:
+            return "Нет повторяющихся напоминаний для удаления.", recur_list_keyboard([])
+        return "Выбери напоминание, которое нужно удалить:", recur_pick_del_keyboard(rows)
 
     if screen == Screen.RECUR_ADD_PROMPT:
         hint = payload.get("hint", "")
@@ -333,6 +373,23 @@ def render_panel(chat_id: int, screen: str, payload: dict) -> Tuple[str, InlineK
         reminder_text = payload.get("reminder_text", "")
         text = f"«{reminder_text[:40]}{'…' if len(reminder_text) > 40 else ''}»\n\nКогда напоминать? Выбери вариант ниже."
         return text, recur_schedule_keyboard()
+
+    if screen == Screen.RECUR_ADD_CUSTOM_DAY:
+        reminder_text = payload.get("reminder_text", "")
+        hint = payload.get("hint", "")
+        short = f"«{reminder_text[:40]}{'…' if len(reminder_text) > 40 else ''}»\n\n" if reminder_text else ""
+        text = (
+            f"{short}Введи расписание текстом.\n\n"
+            "Примеры:\n"
+            "• «7» или «7-го» — каждый месяц 7-го\n"
+            "• «каждый месяц 15-го»\n"
+            "• «последнее число» — каждый месяц 28-го\n"
+            "• «15 ноября» или «15 ноября каждого года»\n"
+            "• «ежегодно 1 марта»"
+        )
+        if hint:
+            text = f"⚠️ {hint}\n\n{text}"
+        return text, InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data=CB.RECUR)]])
 
     # fallback
     return format_tasks_text(chat_id), panel_keyboard()
