@@ -32,8 +32,8 @@ REMINDER_REPEAT_SECONDS = REPEAT_INTERVAL_SEC
 FLASH_SECONDS_DEFAULT = 2.0
 
 # Лимиты выборок задач для picker-экранов
-PICK_DONE_LIMIT = 20
-PICK_DEL_LIMIT = 20
+PICK_DONE_LIMIT = 40
+PICK_DEL_LIMIT = 40
 PICK_REM_LIMIT = 20
 
 # Максимальная длина текста задачи
